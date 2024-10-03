@@ -1,0 +1,47 @@
+grafana:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      external-dns.alpha.kubernetes.io/hostname: vinitham.online
+    hosts:
+    - grafana.vinitham.online
+    tls:
+    - secretName: grafana-tls
+      hosts:
+      - grafana.vinitham.online
+  adminPassword: "admin"
+
+prometheus:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      external-dns.alpha.kubernetes.io/hostname: vinitham.online
+    hosts:
+    - prometheus.vinitham.online
+    tls:
+    - secretName: prometheus-tls
+      hosts:
+      - prometheus.vinitham.online
+
+alertmanager:
+  config:
+    global:
+      smtp_smarthost: 'smtp.gmail.com:587'
+      smtp_from: 'k8shelmprogra@gmail.com'
+      smtp_auth_username: 'k8shelmprogra@gmail.com'
+      smtp_auth_password: 'vpjffbvhrimiqmoy'
+    route:
+      group_by: ['alertname']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      receiver: 'email-notifications'
+    receivers:
+    - name: 'email-notifications'
+      email_configs:
+      - to: 'k8shelmprogra@gmail.com'
+        send_resolved: true
