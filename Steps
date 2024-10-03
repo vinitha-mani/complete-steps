@@ -1,3 +1,5 @@
+eksctl create cluster -f cluster.yaml
+
 Steps:-
 1. External DNS Setup
 2. Nginx Ingress Controller
@@ -9,6 +11,7 @@ First, let's start with External DNS setup:
 
 1. Create IAM Policy for External DNS
 
+Go to Aws -> Iam -> create policy -> json -> copy the content of the policy.json
 
 apiVersion: v1
 kind: ServiceAccount
