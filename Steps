@@ -13,256 +13,96 @@ First, let's start with External DNS setup:
 
 Go to Aws -> Iam -> create policy -> json -> copy the content of the policy.json
 
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: external-dns
-  namespace: kube-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: external-dns
-rules:
-- apiGroups: [""]
-  resources: ["services","endpoints","pods"]
-  verbs: ["get","watch","list"]
-- apiGroups: ["extensions","networking.k8s.io"]
-  resources: ["ingresses"]
-  verbs: ["get","watch","list"]
-- apiGroups: [""]
-  resources: ["nodes"]
-  verbs: ["list","watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: external-dns-viewer
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: external-dns
-subjects:
-- kind: ServiceAccount
-  name: external-dns
-  namespace: kube-system
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: external-dns
-  namespace: kube-system
-spec:
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: external-dns
-  template:
-    metadata:
-      labels:
-        app: external-dns
-    spec:
-      serviceAccountName: external-dns
-      containers:
-      - name: external-dns
-        image: k8s.gcr.io/external-dns/external-dns:v0.12.0
-        args:
-        - --source=service
-        - --source=ingress
-        - --domain-filter=your-domain.com # Replace with your domain
-        - --provider=aws
-        - --policy=upsert-only
-        - --aws-zone-type=public
-        - --registry=txt
-        - --txt-owner-id=external-dns
+export cluster_name=my-cluster
 
-```
+oidc_id=$(aws eks describe-cluster --name $cluster_name --query "cluster.identity.oidc.issuer" --output text | cut -d '/' -f 5)
+
+echo $oidc_id
+
+aws iam list-open-id-connect-providers | grep $oidc_id | cut -d "/" -f4
+
+eksctl utils associate-iam-oidc-provider --cluster $cluster_name --approve
+
+export role_name=AmazonExternal_DNS_Role
+
+# Create the IAM service account
+eksctl create iamserviceaccount \
+    --name external-dns-sa \
+    --namespace kube-system \
+    --cluster $cluster_name \
+    --role-name $role_name \
+    --role-only \
+    --attach-policy-arn arn:aws:iam::aws:policy/AmazonRoute53FullAccess \
+    --approve
+
+# Fetch and modify the trust policy
+TRUST_POLICY=$(aws iam get-role --role-name $role_name --query 'Role.AssumeRolePolicyDocument' | \
+    sed -e 's/kube-system:external-dns-sa/kube-system:external-dns-*/' -e 's/StringEquals/StringLike/')
+
+# Update the role with the modified trust policy
+aws iam update-assume-role-policy --role-name $role_name --policy-document "$TRUST_POLICY"
+
+eksctl create iamserviceaccount --name <SERVICE_ACCOUNT_NAME> --namespace kube-system --cluster CLUSTER_NAME --attach-policy-arn <IAM_POLICY_ARN> --approve --region < >
+
+kubectl api-versions | grep rbac.authorization.k8s.io
+
+if we get output 
+
+then follow below
+
+kubectl create -f clusterrole.yaml
+
+kubectl create -f clusterrolebinding.yaml
+
+kubectl create -f external-dns.yaml(change txt-owner-id as zone id, domain-filter as domain and aws-zone-type as public
+
+kubectl logs -l app.kubernetes.io/name=external-dns -n kube-system
 
 Next, let's set up Nginx Ingress Controller:
 
-```yaml
-# Install using Helm
+Install using Helm
 apiVersion: v1
 kind: Namespace
 metadata:
   name: ingress-nginx
 ---
-# Helm commands to run:
-# helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-# helm repo update
-# helm install ingress-nginx ingress-nginx/ingress-nginx \
-#   --namespace ingress-nginx \
-#   --set controller.service.type=LoadBalancer \
-#   --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"="nlb"
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo update
+helm install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx \
+  --set controller.service.type=LoadBalancer \
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"="nlb"
 
 ```
 
 Now, let's set up Cert-Manager with Let's Encrypt:
 
-```yaml
-# Install Cert-Manager
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-prod
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: your-email@domain.com # Replace with your email
-    privateKeySecretRef:
-      name: letsencrypt-prod
-    solvers:
-    - http01:
-        ingress:
-          class: nginx
+Install Cert-Manager
+
+k create -f clusterissuer.yaml
 ---
-# Helm commands to install cert-manager:
-# helm repo add jetstack https://charts.jetstack.io
-# helm repo update
-# helm install cert-manager jetstack/cert-manager \
-#   --namespace cert-manager \
-#   --create-namespace \
-#   --set installCRDs=true
-
-```
-
-Let's set up Prometheus and Grafana:
-
-```yaml
-# values.yaml for Prometheus-Grafana stack
-grafana:
-  ingress:
-    enabled: true
-    ingressClassName: nginx
-    annotations:
-      cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    hosts:
-      - grafana.your-domain.com
-    tls:
-      - secretName: grafana-tls
-        hosts:
-          - grafana.your-domain.com
-  adminPassword: "your-secure-password"
-
-prometheus:
-  ingress:
-    enabled: true
-    ingressClassName: nginx
-    annotations:
-      cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    hosts:
-      - prometheus.your-domain.com
-    tls:
-      - secretName: prometheus-tls
-        hosts:
-          - prometheus.your-domain.com
-
-alertmanager:
-  config:
-    global:
-      smtp_smarthost: 'smtp.gmail.com:587'
-      smtp_from: 'your-email@gmail.com'
-      smtp_auth_username: 'your-email@gmail.com'
-      smtp_auth_password: 'your-app-specific-password'
-    route:
-      group_by: ['alertname']
-      group_wait: 30s
-      group_interval: 5m
-      repeat_interval: 4h
-      receiver: 'email-notifications'
-    receivers:
-    - name: 'email-notifications'
-      email_configs:
-      - to: 'your-email@domain.com'
-        send_resolved: true
-
-```
-
-Now, let's create some example alert rules:
-
-```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
-metadata:
-  name: prometheus-alert-rules
-  namespace: monitoring
-spec:
-  groups:
-  - name: node
-    rules:
-    - alert: HighCPUUsage
-      expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])) * 100) > 80
-      for: 5m
-      labels:
-        severity: warning
-      annotations:
-        summary: High CPU usage on {{ $labels.instance }}
-        description: CPU usage is above 80% for 5 minutes
-
-    - alert: HighMemoryUsage
-      expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > 80
-      for: 5m
-      labels:
-        severity: warning
-      annotations:
-        summary: High memory usage on {{ $labels.instance }}
-        description: Memory usage is above 80% for 5 minutes
-
-```
-
-Here are the complete steps to deploy everything:
-
-1. **Create Required Namespaces:**
-```bash
-kubectl create namespace monitoring
-kubectl create namespace cert-manager
-kubectl create namespace ingress-nginx
-```
-
-2. **Deploy External DNS:**
-```bash
-# First create AWS IAM role with required permissions
-# Then apply the external-dns configuration
-kubectl apply -f external-dns.yaml
-```
-
-3. **Install Nginx Ingress Controller:**
-```bash
-helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-helm repo update
-helm install ingress-nginx ingress-nginx/ingress-nginx \
-  --namespace ingress-nginx \
-  --set controller.service.type=LoadBalancer
-```
-
-4. **Install Cert-Manager:**
-```bash
+Helm commands to install cert-manager:
 helm repo add jetstack https://charts.jetstack.io
 helm repo update
 helm install cert-manager jetstack/cert-manager \
-  --namespace cert-manager \
-  --create-namespace \
-  --set installCRDs=true
+ --namespace cert-manager \
+ --create-namespace \
+ --set installCRDs=true
 
-# Apply ClusterIssuer
-kubectl apply -f cluster-issuer.yaml
 ```
+kubectl get pods -n cert-manager
+kubectl create -f clusterissuer.yaml
+kubectl get clusterissuer
+kubectl create -f secret.yaml
 
-5. **Install Prometheus Stack:**
-```bash
+Let's set up Prometheus and Grafana:
+
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
-helm install prometheus prometheus-community/kube-prometheus-stack \
-  --namespace monitoring \
-  -f values.yaml
+k create ns monitoring
+helm install prometheus prometheus-community/kube-prometheus-stack   --namespace monitoring   -f values.yaml
+k create -f prometheus-alerts.yaml
 
-# Apply alert rules
-kubectl apply -f prometheus-alerts.yaml
-```
-
-6. **Verify the Setup:**
-```bash
 # Check all deployments
 kubectl get pods -n monitoring
 kubectl get pods -n cert-manager
@@ -283,16 +123,8 @@ To test the alerts:
 1. Login to Grafana
 2. Go to Alerting section
 3. You can simulate high CPU usage with:
-```bash
+
 kubectl run cpu-test --image=containerstack/cpustress -- --cpu 4 --timeout 60s
-```
 
-Remember to:
-1. Replace `your-domain.com` with your actual domain
-2. Update email addresses
-3. Update SMTP credentials for AlertManager
-4. Secure your Grafana and Prometheus endpoints with proper authentication
-
-Would you like me to explain any part in more detail or provide additional configurations?
 
 
